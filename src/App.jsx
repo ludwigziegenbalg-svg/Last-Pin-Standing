@@ -19,6 +19,11 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PASSWORT FÜR DEN ZUGANG — HIER ÄNDERN
+// ═══════════════════════════════════════════════════════════════════════════
+const APP_PASSWORD = "Last_Pin.2xxx";
 // ═══════════════════════════════════════════════════════════════════════════
 
 const PLAYERS = ["Flo", "Robert", "Franz", "Moritz", "Julius", "Ludi"];
@@ -138,6 +143,30 @@ const MiniBar = ({value,max,color}) => (
 );
 
 export default function BowlingApp() {
+  // ─── Authentication ────────────────────────────────────────────────────
+  const [isAuthenticated, setIsAuthenticated] = useState(
+    () => typeof window !== "undefined" && localStorage.getItem("bowling_auth") === APP_PASSWORD
+  );
+  const [pwInput, setPwInput] = useState("");
+  const [pwError, setPwError] = useState(false);
+
+  const tryLogin = () => {
+    if (pwInput === APP_PASSWORD) {
+      localStorage.setItem("bowling_auth", APP_PASSWORD);
+      setIsAuthenticated(true);
+      setPwError(false);
+    } else {
+      setPwError(true);
+      setPwInput("");
+    }
+  };
+
+  const logout = () => {
+    localStorage.removeItem("bowling_auth");
+    setIsAuthenticated(false);
+    setPwInput("");
+  };
+
   const [view, setView] = useState("dashboard");
   const [selectedMonth, setSelectedMonth] = useState("Januar");
   const [selectedPlayer, setSelectedPlayer] = useState("Flo");
@@ -660,13 +689,114 @@ export default function BowlingApp() {
     );
   };
 
+  // ─── Login Screen ─────────────────────────────────────────────────────
+  if (!isAuthenticated) {
+    return (
+      <div style={{
+        fontFamily:"'Courier New',Courier,monospace",
+        background:"linear-gradient(135deg,#1a0030 0%,#0d1a2e 60%,#001a10 100%)",
+        minHeight:"100vh",
+        display:"flex",
+        alignItems:"center",
+        justifyContent:"center",
+        padding:20,
+      }}>
+        <div style={{
+          background:"rgba(0,0,0,0.4)",
+          border:"1px solid rgba(255,255,255,0.1)",
+          borderRadius:6,
+          padding:"36px 28px",
+          maxWidth:340,
+          width:"100%",
+          textAlign:"center",
+          boxShadow:"0 8px 40px rgba(0,0,0,0.5)",
+        }}>
+          <div style={{fontSize:42,marginBottom:10}}>🎳</div>
+          <div style={{fontSize:18,fontWeight:700,letterSpacing:3,color:"#fff",textTransform:"uppercase",marginBottom:4}}>Last PIN Standing</div>
+          <div style={{fontSize:9,letterSpacing:4,color:"#666",marginBottom:28}}>LIGA BOWLING JCL · ZUGANG GESCHÜTZT</div>
+
+          <div style={{textAlign:"left"}}>
+            <div style={{fontSize:9,letterSpacing:3,color:"#888",marginBottom:6}}>PASSWORT</div>
+            <input
+              type="password"
+              value={pwInput}
+              onChange={e=>{setPwInput(e.target.value);setPwError(false);}}
+              onKeyDown={e=>e.key==="Enter"&&tryLogin()}
+              autoFocus
+              placeholder="••••••••"
+              style={{
+                width:"100%",
+                background:"rgba(255,255,255,0.05)",
+                border:`1px solid ${pwError?"#ff6b6b":"#333"}`,
+                color:"#fff",
+                padding:"11px 14px",
+                borderRadius:3,
+                fontSize:14,
+                fontFamily:"inherit",
+                boxSizing:"border-box",
+                outline:"none",
+                transition:"border-color 0.2s",
+              }}
+            />
+            {pwError && (
+              <div style={{fontSize:10,color:"#ff6b6b",marginTop:8,letterSpacing:1}}>
+                ✗ Falsches Passwort
+              </div>
+            )}
+          </div>
+
+          <button onClick={tryLogin} style={{
+            marginTop:18,
+            width:"100%",
+            background:"rgba(255,107,107,0.15)",
+            border:"1px solid #ff6b6b",
+            color:"#ff6b6b",
+            padding:"11px",
+            borderRadius:3,
+            cursor:"pointer",
+            fontSize:10,
+            letterSpacing:3,
+            textTransform:"uppercase",
+            fontFamily:"inherit",
+            fontWeight:600,
+            transition:"all 0.2s",
+          }}>
+            🎳 Einloggen
+          </button>
+
+          <div style={{fontSize:8,color:"#444",letterSpacing:2,marginTop:20,lineHeight:1.6}}>
+            Nur für Mitglieder von<br/>"Last PIN Standing"
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={css.app}>
       <style>{`@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }`}</style>
       <div style={css.hdr}>
-        <div style={css.logo}><span>🎳</span><span>Last PIN Standing</span></div>
-        <div style={css.sub}>Liga Bowling JCL · Saison 2025 / 2026</div>
-        <StatusBadge/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
+          <div>
+            <div style={css.logo}><span>🎳</span><span>Last PIN Standing</span></div>
+            <div style={css.sub}>Liga Bowling JCL · Saison 2025 / 2026</div>
+            <StatusBadge/>
+          </div>
+          <button onClick={logout} title="Abmelden" style={{
+            background:"transparent",
+            border:"1px solid #333",
+            color:"#666",
+            padding:"5px 10px",
+            borderRadius:2,
+            cursor:"pointer",
+            fontSize:8,
+            letterSpacing:2,
+            textTransform:"uppercase",
+            fontFamily:"inherit",
+            flexShrink:0,
+            transition:"all 0.2s",
+          }}>🔒 Logout</button>
+        </div>
         <div style={css.nav}>
           {[{id:"dashboard",l:"Dashboard"},{id:"eingabe",l:"Eingabe 2026"},{id:"statistiken",l:"Statistiken"},{id:"spieler",l:"Spielerprofil"}].map(({id,l})=>(
             <button key={id} style={css.navBtn(view===id)} onClick={()=>setView(id)}>{l}</button>
