@@ -4,7 +4,6 @@ import { getDatabase, ref, onValue, set } from "firebase/database";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // FIREBASE KONFIGURATION — HIER DEINE WERTE EINFÜGEN
-// (Anleitung in der README.md)
 // ═══════════════════════════════════════════════════════════════════════════
 const firebaseConfig = {
   apiKey: "AIzaSyAJJ8wFEUGcgjtI1cEs3XrF-ZON_XkGtOU",
@@ -23,12 +22,17 @@ const db = getDatabase(app);
 // ═══════════════════════════════════════════════════════════════════════════
 // PASSWORT FÜR DEN ZUGANG — HIER ÄNDERN
 // ═══════════════════════════════════════════════════════════════════════════
-const APP_PASSWORD = "Last_Pin.2xxx";
+const APP_PASSWORD = "LastPin2026";
 // ═══════════════════════════════════════════════════════════════════════════
 
 const PLAYERS = ["Flo", "Robert", "Franz", "Moritz", "Julius", "Ludi"];
 const PLAYERS_2025 = ["Flo", "Robert", "Franz", "Moritz", "Julius", "Ludi", "Kay"];
 const MONTHS = ["Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November"];
+
+// Special key for the monthly guest player
+const GUEST_KEY = "__guest";
+const GUEST_COLOR = "#7DD3FC";
+const MAX_PLAYERS_PER_DAY = 6;
 
 const PENALTY_TYPES = [
   { key: "ratte",         label: "🐀 Ratte",               desc: "Gutter Ball — komplett daneben",                cost: 2 },
@@ -41,6 +45,7 @@ const PENALTY_TYPES = [
 const PLAYER_COLORS = {
   Flo:"#FF6B6B", Robert:"#4ECDC4", Franz:"#45B7D1",
   Moritz:"#96CEB4", Julius:"#FFEAA7", Ludi:"#DDA0DD", Kay:"#F0A500",
+  [GUEST_KEY]: GUEST_COLOR,
 };
 
 // ─── 2025 Historical Scores (read-only) ────────────────────────────────────
@@ -103,7 +108,10 @@ const INITIAL_2026 = {
 const emptyMonth = () => ({
   scores: Object.fromEntries(PLAYERS.map(p=>[p,[0,0,0]])),
   penalties: Object.fromEntries(PLAYERS.map(p=>[p,{ratte:0,nullnummer:0,uhu:0,keine_raeumung:0,verspaetung:0}])),
+  guestName: "",
 });
+
+const emptyPen = () => ({ratte:0,nullnummer:0,uhu:0,keine_raeumung:0,verspaetung:0});
 
 function calcPenaltySum(pen) {
   return PENALTY_TYPES.reduce((a,pt)=>a+(pen?.[pt.key]||0)*pt.cost,0);
@@ -115,6 +123,16 @@ function getTop4PerRound(scoresObj, playerList) {
     const vals = playerList.map(p=>({p,v:scoresObj?.[p]?.[r]||0})).filter(x=>x.v>0).sort((a,b)=>b.v-a.v);
     return new Set(vals.slice(0,4).map(x=>x.p));
   });
+}
+
+// Build effective player list for a given month (adds guest if named + has scores)
+function getMonthPlayers(monthData, basePlayers) {
+  const list = [...basePlayers];
+  if (monthData?.guestName && monthData.guestName.trim()) {
+    const hasScores = (monthData.scores?.[GUEST_KEY] || []).some(v => v > 0);
+    if (hasScores) list.push(GUEST_KEY);
+  }
+  return list;
 }
 
 const Sparkline = ({values,color,width=110,height=26}) => {
@@ -174,13 +192,14 @@ export default function BowlingApp() {
 
   // ─── Cloud-synced 2026 data ────────────────────────────────────────────
   const [data2026, setData2026] = useState({});
-  const [syncStatus, setSyncStatus] = useState("connecting"); // connecting | online | offline | error
+  const [syncStatus, setSyncStatus] = useState("connecting");
   const [editScores, setEditScores] = useState({});
   const [editPenalties, setEditPenalties] = useState({});
+  const [editGuestName, setEditGuestName] = useState("");
   const [saveFlash, setSaveFlash] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
+  const [loadedMonth, setLoadedMonth] = useState(null);
 
-  // Subscribe to firebase realtime updates
   useEffect(()=>{
     const dbRef = ref(db, "bowling/2026");
     const unsub = onValue(dbRef, (snap)=>{
@@ -188,7 +207,6 @@ export default function BowlingApp() {
       if(val){
         setData2026(val);
       } else {
-        // First-time setup: seed Firebase with INITIAL_2026
         const seed = {};
         MONTHS.forEach(m=>{ seed[m]=INITIAL_2026[m]||emptyMonth(); });
         set(dbRef, seed).catch(e=>console.error("Seed failed:", e));
@@ -198,7 +216,6 @@ export default function BowlingApp() {
     }, (err)=>{
       console.error("Firebase error:", err);
       setSyncStatus("error");
-      // Fallback to local-only mode
       const fallback = {};
       MONTHS.forEach(m=>{ fallback[m]=INITIAL_2026[m]||emptyMonth(); });
       setData2026(fallback);
@@ -206,7 +223,29 @@ export default function BowlingApp() {
     return () => unsub();
   },[]);
 
-  // Build season data object
+  // Load month data into edit state whenever month changes or data arrives
+  useEffect(()=>{
+    if(view!=="eingabe") return;
+    if(Object.keys(data2026).length===0) return;
+    if(loadedMonth===selectedMonth) return;
+    const md = data2026[selectedMonth] || emptyMonth();
+    const scores = {};
+    const pens = {};
+    // Base players
+    PLAYERS.forEach(p=>{
+      scores[p] = md.scores?.[p] ? [...md.scores[p]] : [0,0,0];
+      pens[p] = {...emptyPen(), ...(md.penalties?.[p]||{})};
+    });
+    // Guest player
+    scores[GUEST_KEY] = md.scores?.[GUEST_KEY] ? [...md.scores[GUEST_KEY]] : [0,0,0];
+    pens[GUEST_KEY] = {...emptyPen(), ...(md.penalties?.[GUEST_KEY]||{})};
+    setEditScores(scores);
+    setEditPenalties(pens);
+    setEditGuestName(md.guestName || "");
+    setIsDirty(false);
+    setLoadedMonth(selectedMonth);
+  },[view, selectedMonth, data2026, loadedMonth]);
+
   const seasonData = useMemo(()=>{
     if(season==="2025"){
       const d={};
@@ -214,6 +253,7 @@ export default function BowlingApp() {
         d[m]={
           scores: SCORES_2025[m]||{},
           penalties: expandPens(PENS_2025[m]||{}),
+          guestName: "",
         };
       });
       return d;
@@ -221,10 +261,11 @@ export default function BowlingApp() {
     return data2026 || {};
   },[season,data2026]);
 
-  const playerList = season==="2025" ? PLAYERS_2025 : PLAYERS;
+  const basePlayers = season==="2025" ? PLAYERS_2025 : PLAYERS;
 
   const seasonStats = useMemo(()=>{
-    return playerList.map(p=>{
+    // Season stats: only base players (guests are per-month)
+    return basePlayers.map(p=>{
       let total=0, penTotal=0, count=0;
       const monthly=[];
       MONTHS.forEach(m=>{
@@ -235,36 +276,44 @@ export default function BowlingApp() {
       });
       return {player:p,total,penTotal,count,monthly,avg:count?Math.round(total/count):0,color:PLAYER_COLORS[p]||"#888"};
     }).filter(s=>s.total>0).sort((a,b)=>b.total-a.total);
-  },[seasonData,season]);
+  },[seasonData,basePlayers]);
 
   const monthStats = useMemo(()=>{
     const md=seasonData[selectedMonth]||emptyMonth();
-    const top4=getTop4PerRound(md.scores,playerList);
-    return playerList.map(p=>{
+    const monthPlayers = getMonthPlayers(md, basePlayers);
+    const top4=getTop4PerRound(md.scores,monthPlayers);
+    return monthPlayers.map(p=>{
       const scores=md.scores?.[p]||[0,0,0];
       const total=calcScore(scores);
       const pen=calcPenaltySum(md.penalties?.[p]);
       const inTop4=[0,1,2].map(r=>top4[r].has(p)&&scores[r]>0);
       const wertung=scores.reduce((a,v,r)=>a+(inTop4[r]?v:0),0);
-      return {player:p,scores,total,pen,inTop4,wertung,color:PLAYER_COLORS[p]||"#888"};
+      const displayName = p===GUEST_KEY ? (md.guestName||"Gast") : p;
+      return {player:p,displayName,isGuest:p===GUEST_KEY,scores,total,pen,inTop4,wertung,color:PLAYER_COLORS[p]||GUEST_COLOR};
     }).filter(s=>s.total>0).sort((a,b)=>b.total-a.total);
-  },[seasonData,selectedMonth,season]);
+  },[seasonData,selectedMonth,basePlayers]);
 
   const maxSeason=Math.max(...seasonStats.map(s=>s.total),1);
   const maxMonth=Math.max(...monthStats.map(s=>s.total),1);
 
-  const startEditing=(m)=>{
-    const md=data2026?.[m]||emptyMonth();
-    setEditScores(JSON.parse(JSON.stringify(md.scores||emptyMonth().scores)));
-    setEditPenalties(JSON.parse(JSON.stringify(md.penalties||emptyMonth().penalties)));
-    setIsDirty(false);
-  };
-
   const saveMonth = async (m) => {
     try {
+      // Only include guest if name AND scores are set
+      const guestActive = editGuestName.trim() && (editScores[GUEST_KEY]||[0,0,0]).some(v=>v>0);
+      const payloadScores = {};
+      const payloadPens = {};
+      PLAYERS.forEach(p=>{
+        payloadScores[p] = editScores[p] || [0,0,0];
+        payloadPens[p] = editPenalties[p] || emptyPen();
+      });
+      if(guestActive){
+        payloadScores[GUEST_KEY] = editScores[GUEST_KEY];
+        payloadPens[GUEST_KEY] = editPenalties[GUEST_KEY] || emptyPen();
+      }
       await set(ref(db, `bowling/2026/${m}`), {
-        scores: editScores,
-        penalties: editPenalties,
+        scores: payloadScores,
+        penalties: payloadPens,
+        guestName: guestActive ? editGuestName.trim() : "",
         lastUpdate: Date.now(),
       });
       setSaveFlash(true);
@@ -277,17 +326,24 @@ export default function BowlingApp() {
   };
 
   const updateScore=(p,r,val)=>{
-    const v=parseInt(val)||0;
-    setEditScores(prev=>({...prev,[p]:(prev[p]||[0,0,0]).map((s,i)=>i===r?v:s)}));
+    // Sanitize: allow empty string or numeric; clamp 0-300
+    const raw = val.replace(/[^\d]/g,"");
+    const num = raw==="" ? 0 : Math.min(300, parseInt(raw,10));
+    setEditScores(prev=>({...prev,[p]:(prev[p]||[0,0,0]).map((s,i)=>i===r?num:s)}));
     setIsDirty(true);
   };
   const updatePenalty=(p,type,val)=>{
-    const v=parseInt(val)||0;
-    setEditPenalties(prev=>({...prev,[p]:{...(prev[p]||{}), [type]:v}}));
+    const raw = val.replace(/[^\d]/g,"");
+    const num = raw==="" ? 0 : Math.min(20, parseInt(raw,10));
+    setEditPenalties(prev=>({...prev,[p]:{...(prev[p]||{}), [type]:num}}));
     setIsDirty(true);
   };
-  const editTop4=useMemo(()=>getTop4PerRound(editScores,PLAYERS),[editScores]);
+  const updateGuestName = (val) => {
+    setEditGuestName(val);
+    setIsDirty(true);
+  };
 
+  // ─── Styles ───────────────────────────────────────────────────────────
   const css = {
     app:      {fontFamily:"'Courier New',Courier,monospace",background:"#080810",minHeight:"100vh",color:"#e0e0e0",paddingBottom:40},
     hdr:      {background:"linear-gradient(135deg,#1a0030 0%,#0d1a2e 60%,#001a10 100%)",padding:"22px 18px 14px",borderBottom:"2px solid #2a2a4a",position:"sticky",top:0,zIndex:100},
@@ -300,6 +356,7 @@ export default function BowlingApp() {
     ctitle:   {fontSize:9,letterSpacing:4,textTransform:"uppercase",color:"#555",marginBottom:13},
     dot:      (c)=>({width:9,height:9,borderRadius:"50%",background:c,flexShrink:0}),
     input:    {background:"rgba(255,255,255,0.05)",border:"1px solid #2a2a2a",color:"#fff",padding:"5px 7px",borderRadius:2,width:"100%",fontSize:13,textAlign:"center",fontFamily:"inherit"},
+    textInput:{background:"rgba(255,255,255,0.05)",border:"1px solid #2a2a2a",color:"#fff",padding:"5px 8px",borderRadius:2,fontSize:12,fontFamily:"inherit"},
     stab:     (a,c)=>({padding:"5px 11px",borderRadius:2,border:`1px solid ${a?c:"#222"}`,background:a?`${c}18`:"transparent",color:a?c:"#555",cursor:"pointer",fontSize:9,letterSpacing:2,transition:"all 0.2s"}),
     seasontab:(a)=>({padding:"5px 13px",borderRadius:2,border:`1px solid ${a?"#FFD700":"#333"}`,background:a?"rgba(255,215,0,0.12)":"transparent",color:a?"#FFD700":"#666",cursor:"pointer",fontSize:10,letterSpacing:2,fontWeight:600,transition:"all 0.2s"}),
     saveBtn:  (f,dirty)=>({background:f?"rgba(0,204,102,0.12)":dirty?"rgba(255,107,107,0.15)":"rgba(255,107,107,0.05)",border:`1px solid ${f?"#00cc66":"#ff6b6b"}`,color:f?"#00cc66":"#ff6b6b",padding:"8px 22px",borderRadius:2,cursor:"pointer",fontSize:9,letterSpacing:3,textTransform:"uppercase",transition:"all 0.3s",marginTop:13,opacity:dirty||f?1:0.6}),
@@ -307,7 +364,11 @@ export default function BowlingApp() {
     statusDot:(s)=>({width:7,height:7,borderRadius:"50%",background:s==="online"?"#00cc66":s==="error"?"#ff6b6b":"#FFEAA7",boxShadow:`0 0 6px ${s==="online"?"#00cc66":s==="error"?"#ff6b6b":"#FFEAA7"}`,animation:s==="connecting"?"pulse 1.5s infinite":"none"}),
   };
 
-  const StatusBadge = () => (
+  // ─── Renderers (called as functions, NOT rendered as components) ────────
+  // This is the key fix: calling as functions keeps the same fiber tree,
+  // so inputs never lose focus during re-renders.
+
+  const renderStatusBadge = () => (
     <div style={{display:"flex",alignItems:"center",gap:6,marginTop:6}}>
       <span style={css.statusDot(syncStatus)}/>
       <span style={{fontSize:8,letterSpacing:2,color:syncStatus==="online"?"#00cc66":syncStatus==="error"?"#ff6b6b":"#FFEAA7"}}>
@@ -316,7 +377,7 @@ export default function BowlingApp() {
     </div>
   );
 
-  const SeasonSelector = () => (
+  const renderSeasonSelector = () => (
     <div style={{display:"flex",gap:8,marginBottom:16,alignItems:"center"}}>
       <span style={{fontSize:8,color:"#444",letterSpacing:3}}>SAISON</span>
       {["2025","2026"].map(y=>(
@@ -325,9 +386,9 @@ export default function BowlingApp() {
     </div>
   );
 
-  const Dashboard = () => (
+  const renderDashboard = () => (
     <div style={css.sec}>
-      <SeasonSelector/>
+      {renderSeasonSelector()}
       <div style={css.card}>
         <div style={css.ctitle}>🏆 Saisonranking {season}</div>
         {seasonStats.map((s,i)=>(
@@ -365,9 +426,12 @@ export default function BowlingApp() {
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(145px,1fr))",gap:9}}>
         {MONTHS.map(m=>{
           const md=seasonData[m];
-          const tot=playerList.reduce((a,p)=>a+calcScore(md?.scores?.[p]),0);
+          const mp=getMonthPlayers(md,basePlayers);
+          const tot=mp.reduce((a,p)=>a+calcScore(md?.scores?.[p]),0);
           const has=tot>0;
-          const leader=has?playerList.filter(p=>calcScore(md?.scores?.[p])>0).reduce((a,p)=>calcScore(md?.scores?.[p])>calcScore(md?.scores?.[a])?p:a,playerList[0]):null;
+          const leader=has?mp.filter(p=>calcScore(md?.scores?.[p])>0).reduce((a,p)=>calcScore(md?.scores?.[p])>calcScore(md?.scores?.[a])?p:a,mp[0]):null;
+          const leaderName = leader===GUEST_KEY ? (md.guestName||"Gast") : leader;
+          const leaderColor = leader===GUEST_KEY ? GUEST_COLOR : PLAYER_COLORS[leader]||"#888";
           return (
             <div key={m} onClick={()=>{setSelectedMonth(m);setView(season==="2026"?"eingabe":"statistiken");}}
               style={{...css.card,cursor:"pointer",opacity:has?1:0.32,padding:12,borderColor:selectedMonth===m?"#4ecdc4":"rgba(255,255,255,0.06)",transition:"all 0.2s",marginBottom:0}}>
@@ -376,8 +440,8 @@ export default function BowlingApp() {
                 <div style={{fontSize:17,fontWeight:700}}>{tot}</div>
                 <div style={{fontSize:7,color:"#444",letterSpacing:2}}>TEAM PINS</div>
                 {leader&&<div style={{marginTop:7,display:"flex",alignItems:"center",gap:5}}>
-                  <span style={css.dot(PLAYER_COLORS[leader]||"#888")}/>
-                  <span style={{fontSize:9,color:"#999"}}>{leader}</span>
+                  <span style={css.dot(leaderColor)}/>
+                  <span style={{fontSize:9,color:"#999"}}>{leaderName}</span>
                 </div>}
               </>:<div style={{fontSize:9,color:"#333"}}>Noch nicht gespielt</div>}
             </div>
@@ -387,24 +451,41 @@ export default function BowlingApp() {
     </div>
   );
 
-  const Eingabe = () => {
-    const editing=Object.keys(editScores).length>0;
-    if(!editing && Object.keys(data2026).length>0) startEditing(selectedMonth);
-    const roundTots=[0,1,2].map(r=>PLAYERS.reduce((a,p)=>a+(editScores[p]?.[r]||0),0));
-    const wertTots=[0,1,2].map(r=>PLAYERS.reduce((a,p)=>a+(editTop4[r].has(p)&&(editScores[p]?.[r]||0)>0?editScores[p][r]:0),0));
-
-    if(syncStatus==="connecting" || Object.keys(data2026).length===0){
+  // ─── EINGABE (with focus-safe inputs and guest player) ──────────────────
+  const renderEingabe = () => {
+    if(syncStatus==="connecting" || Object.keys(data2026).length===0 || loadedMonth!==selectedMonth){
       return <div style={{...css.sec,textAlign:"center",padding:"60px 20px",color:"#666"}}>
         <div style={{fontSize:28,marginBottom:16}}>🎳</div>
-        <div style={{fontSize:11,letterSpacing:3}}>VERBINDE MIT DATENBANK...</div>
+        <div style={{fontSize:11,letterSpacing:3}}>LADE SPIELTAG...</div>
       </div>;
     }
+
+    // Build the row list: 6 base + optional guest slot
+    const guestActive = editGuestName.trim().length > 0;
+    const rowKeys = [...PLAYERS];
+    if (guestActive) rowKeys.push(GUEST_KEY);
+
+    // Compute top-4 including guest if active
+    const scoresForTop4 = {};
+    rowKeys.forEach(p=>{ scoresForTop4[p] = editScores[p] || [0,0,0]; });
+    const editTop4 = getTop4PerRound(scoresForTop4, rowKeys);
+
+    // Count active players (having at least one score)
+    const activeCount = rowKeys.filter(p=>(editScores[p]||[0,0,0]).some(v=>v>0)).length;
+    const overLimit = activeCount > MAX_PLAYERS_PER_DAY;
+
+    const roundTots = [0,1,2].map(r=>rowKeys.reduce((a,p)=>a+(editScores[p]?.[r]||0),0));
+    const wertTots  = [0,1,2].map(r=>rowKeys.reduce((a,p)=>a+(editTop4[r].has(p)&&(editScores[p]?.[r]||0)>0?editScores[p][r]:0),0));
 
     return (
       <div style={css.sec}>
         <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:16}}>
           {MONTHS.map(m=>(
-            <button key={m} style={css.stab(selectedMonth===m,"#4ecdc4")} onClick={()=>{setSelectedMonth(m);setEditScores({});setEditPenalties({});setIsDirty(false);}}>
+            <button key={m} style={css.stab(selectedMonth===m,"#4ecdc4")} onClick={()=>{
+              if(isDirty && !confirm("Ungespeicherte Änderungen verwerfen und Monat wechseln?")) return;
+              setSelectedMonth(m);
+              setLoadedMonth(null);
+            }}>
               {m}
             </button>
           ))}
@@ -413,6 +494,13 @@ export default function BowlingApp() {
         <div style={css.card}>
           <div style={css.ctitle}>🎳 Ergebniseingabe — {selectedMonth} 2026</div>
           <div style={{fontSize:8,color:"#4ecdc4",letterSpacing:2,marginBottom:11}}>★ TOP 4 PRO RUNDE KOMMEN IN DIE WERTUNG</div>
+
+          {overLimit && (
+            <div style={{background:"rgba(255,107,107,0.1)",border:"1px solid #ff6b6b",borderRadius:3,padding:"8px 10px",marginBottom:12,fontSize:10,color:"#ff6b6b",letterSpacing:1}}>
+              ⚠️ {activeCount} aktive Spieler — maximal {MAX_PLAYERS_PER_DAY} pro Spieltag erlaubt. Bitte einen Stammspieler leer lassen wenn der Gast mitspielt.
+            </div>
+          )}
+
           <div style={{overflowX:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
               <thead>
@@ -439,10 +527,18 @@ export default function BowlingApp() {
                         return (
                           <td key={r} style={{padding:"5px"}}>
                             <div style={{position:"relative"}}>
-                              <input type="number" min={0} max={300} value={sc[r]||""} placeholder="0"
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                pattern="[0-9]*"
+                                maxLength={3}
+                                value={sc[r]===0?"":sc[r]}
+                                placeholder="0"
                                 onChange={e=>updateScore(p,r,e.target.value)}
-                                style={{...css.input,width:66,border:`1px solid ${isTop?col+"88":"#2a2a2a"}`,background:isTop?`${col}18`:"rgba(255,255,255,0.04)",color:isTop?col:"#ddd",fontWeight:isTop?700:400}}/>
-                              {isTop&&<span style={{position:"absolute",top:-5,right:1,fontSize:8,color:col}}>★</span>}
+                                onFocus={e=>e.target.select()}
+                                style={{...css.input,width:66,border:`1px solid ${isTop?col+"88":"#2a2a2a"}`,background:isTop?`${col}18`:"rgba(255,255,255,0.04)",color:isTop?col:"#ddd",fontWeight:isTop?700:400}}
+                              />
+                              {isTop&&<span style={{position:"absolute",top:-5,right:1,fontSize:8,color:col,pointerEvents:"none"}}>★</span>}
                             </div>
                           </td>
                         );
@@ -451,6 +547,53 @@ export default function BowlingApp() {
                     </tr>
                   );
                 })}
+
+                {/* Guest player row */}
+                <tr style={{borderTop:"2px solid rgba(125,211,252,0.25)",background:"rgba(125,211,252,0.03)"}}>
+                  <td style={{padding:"9px 4px"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:7}}>
+                      <span style={css.dot(GUEST_COLOR)}/>
+                      <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                        <span style={{fontSize:7,letterSpacing:2,color:GUEST_COLOR}}>GAST</span>
+                        <input
+                          type="text"
+                          value={editGuestName}
+                          onChange={e=>updateGuestName(e.target.value)}
+                          placeholder="Name eintragen..."
+                          maxLength={20}
+                          style={{...css.textInput, width:110, borderColor: guestActive?GUEST_COLOR+"55":"#2a2a2a"}}
+                        />
+                      </div>
+                    </div>
+                  </td>
+                  {[0,1,2].map(r=>{
+                    const sc = editScores[GUEST_KEY] || [0,0,0];
+                    const isTop = guestActive && editTop4[r].has(GUEST_KEY) && (sc[r]||0)>0;
+                    return (
+                      <td key={r} style={{padding:"5px"}}>
+                        <div style={{position:"relative"}}>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            maxLength={3}
+                            value={sc[r]===0?"":sc[r]}
+                            placeholder="0"
+                            disabled={!guestActive}
+                            onChange={e=>updateScore(GUEST_KEY,r,e.target.value)}
+                            onFocus={e=>e.target.select()}
+                            style={{...css.input,width:66,border:`1px solid ${isTop?GUEST_COLOR+"88":"#2a2a2a"}`,background:isTop?`${GUEST_COLOR}18`:"rgba(255,255,255,0.04)",color:isTop?GUEST_COLOR:"#ddd",fontWeight:isTop?700:400,opacity:guestActive?1:0.4}}
+                          />
+                          {isTop&&<span style={{position:"absolute",top:-5,right:1,fontSize:8,color:GUEST_COLOR,pointerEvents:"none"}}>★</span>}
+                        </div>
+                      </td>
+                    );
+                  })}
+                  <td style={{padding:"7px 5px",textAlign:"center",fontWeight:700,fontSize:15,color:GUEST_COLOR,opacity:guestActive?1:0.4}}>
+                    {calcScore(editScores[GUEST_KEY])}
+                  </td>
+                </tr>
+
                 <tr style={{borderTop:"2px solid rgba(255,255,255,0.07)"}}>
                   <td style={{padding:"7px 4px",fontSize:7,letterSpacing:2,color:"#444"}}>ALLE PINS</td>
                   {roundTots.map((t,i)=><td key={i} style={{textAlign:"center",fontSize:11,color:"#555",padding:"7px 5px"}}>{t}</td>)}
@@ -463,6 +606,10 @@ export default function BowlingApp() {
                 </tr>
               </tbody>
             </table>
+          </div>
+
+          <div style={{fontSize:8,color:"#555",letterSpacing:1,marginTop:10,lineHeight:1.5}}>
+            💡 Für einen Gastspieler: Name eintragen, dann werden die Score-Felder freigeschaltet. Ergebnisse zählen mit in die Wertung.
           </div>
         </div>
 
@@ -496,19 +643,59 @@ export default function BowlingApp() {
                       </td>
                       {PENALTY_TYPES.map(pt=>(
                         <td key={pt.key} style={{padding:"4px"}}>
-                          <input type="number" min={0} max={20} value={pen[pt.key]||""} placeholder="0"
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            maxLength={2}
+                            value={pen[pt.key]===0||pen[pt.key]==null?"":pen[pt.key]}
+                            placeholder="0"
                             onChange={e=>updatePenalty(p,pt.key,e.target.value)}
-                            style={{...css.input,width:54,fontSize:12}}/>
+                            onFocus={e=>e.target.select()}
+                            style={{...css.input,width:54,fontSize:12}}
+                          />
                         </td>
                       ))}
                       <td style={{textAlign:"center",fontWeight:700,fontSize:14,color:"#ff6b6b",padding:"6px"}}>{tot}</td>
                     </tr>
                   );
                 })}
+
+                {/* Guest penalty row */}
+                {guestActive && (
+                  <tr style={{borderTop:"1px solid rgba(125,211,252,0.2)",background:"rgba(125,211,252,0.03)"}}>
+                    <td style={{padding:"6px 4px"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6}}>
+                        <span style={css.dot(GUEST_COLOR)}/><span style={{fontSize:11,fontWeight:600,color:GUEST_COLOR}}>{editGuestName}</span>
+                      </div>
+                    </td>
+                    {PENALTY_TYPES.map(pt=>{
+                      const pen = editPenalties[GUEST_KEY] || {};
+                      return (
+                        <td key={pt.key} style={{padding:"4px"}}>
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            maxLength={2}
+                            value={pen[pt.key]===0||pen[pt.key]==null?"":pen[pt.key]}
+                            placeholder="0"
+                            onChange={e=>updatePenalty(GUEST_KEY,pt.key,e.target.value)}
+                            onFocus={e=>e.target.select()}
+                            style={{...css.input,width:54,fontSize:12}}
+                          />
+                        </td>
+                      );
+                    })}
+                    <td style={{textAlign:"center",fontWeight:700,fontSize:14,color:"#ff6b6b",padding:"6px"}}>
+                      {calcPenaltySum(editPenalties[GUEST_KEY])}
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
-          <div style={{display:"flex",alignItems:"center",gap:14,marginTop:13}}>
+          <div style={{display:"flex",alignItems:"center",gap:14,marginTop:13,flexWrap:"wrap"}}>
             <button style={css.saveBtn(saveFlash,isDirty)} onClick={()=>saveMonth(selectedMonth)} disabled={syncStatus==="error"}>
               {saveFlash?"✓ Cloud-Speicherung erfolgreich":isDirty?"☁️ Änderungen speichern":"💾 Speichern"}
             </button>
@@ -519,9 +706,9 @@ export default function BowlingApp() {
     );
   };
 
-  const Statistiken = () => (
+  const renderStatistiken = () => (
     <div style={css.sec}>
-      <SeasonSelector/>
+      {renderSeasonSelector()}
       <div style={{display:"flex",gap:5,flexWrap:"wrap",marginBottom:16}}>
         {MONTHS.map(m=>(<button key={m} style={css.stab(selectedMonth===m,"#4ecdc4")} onClick={()=>setSelectedMonth(m)}>{m}</button>))}
       </div>
@@ -535,11 +722,12 @@ export default function BowlingApp() {
             <span style={{fontSize:14,fontWeight:700,width:17,textAlign:"right",color:i===0?"#FFD700":i===1?"#C0C0C0":i===2?"#CD7F32":"#333",flexShrink:0}}>{i+1}</span>
             <span style={css.dot(s.color)}/>
             <div style={{flex:1}}>
-              <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:7}}>
-                <span style={{fontSize:12,fontWeight:600}}>{s.player}</span>
+              <div style={{display:"flex",alignItems:"center",gap:9,marginBottom:7,flexWrap:"wrap"}}>
+                <span style={{fontSize:12,fontWeight:600}}>{s.displayName}</span>
+                {s.isGuest && <span style={{fontSize:7,padding:"2px 6px",borderRadius:2,background:`${GUEST_COLOR}22`,color:GUEST_COLOR,border:`1px solid ${GUEST_COLOR}55`,letterSpacing:1}}>GAST</span>}
                 {i===0&&<span style={{fontSize:8,padding:"2px 7px",borderRadius:2,background:"rgba(255,215,0,0.15)",color:"#FFD700",border:"1px solid rgba(255,215,0,0.4)",letterSpacing:1}}>👑 SIEGER</span>}
               </div>
-              <div style={{display:"flex",gap:6,marginBottom:7,alignItems:"center"}}>
+              <div style={{display:"flex",gap:6,marginBottom:7,alignItems:"center",flexWrap:"wrap"}}>
                 {s.scores.map((sc,r)=>(
                   <div key={r} style={css.top4cell(s.inTop4[r],s.color)}>
                     <div style={{fontSize:7,color:s.inTop4[r]?s.color+"aa":"#444",marginBottom:2}}>R{r+1}{s.inTop4[r]?" ★":""}</div>
@@ -573,7 +761,7 @@ export default function BowlingApp() {
                 {sorted.map(s=>(
                   <div key={s.player} style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,opacity:s.inTop4[r]?1:0.3}}>
                     <span style={{...css.dot(s.color),width:6,height:6}}/>
-                    <span style={{fontSize:10,flex:1,color:s.inTop4[r]?"#ddd":"#444"}}>{s.player}</span>
+                    <span style={{fontSize:10,flex:1,color:s.inTop4[r]?"#ddd":"#444"}}>{s.displayName}{s.isGuest?" ⭐":""}</span>
                     {s.inTop4[r]&&<span style={{fontSize:8,color:s.color}}>★</span>}
                     <span style={{fontSize:11,fontWeight:s.inTop4[r]?700:400,color:s.inTop4[r]?s.color:"#333"}}>{s.scores[r]||0}</span>
                   </div>
@@ -586,7 +774,7 @@ export default function BowlingApp() {
     </div>
   );
 
-  const SpielerProfil = () => {
+  const renderSpielerProfil = () => {
     const col=PLAYER_COLORS[selectedPlayer]||"#888";
     const monthly=MONTHS.map(m=>{
       const sc=seasonData[m]?.scores?.[selectedPlayer]||[0,0,0];
@@ -602,9 +790,9 @@ export default function BowlingApp() {
 
     return (
       <div style={css.sec}>
-        <SeasonSelector/>
+        {renderSeasonSelector()}
         <div style={{display:"flex",gap:7,flexWrap:"wrap",marginBottom:16}}>
-          {playerList.map(p=>(
+          {basePlayers.map(p=>(
             <button key={p} onClick={()=>setSelectedPlayer(p)} style={{
               padding:"6px 15px",borderRadius:2,border:`1px solid ${selectedPlayer===p?PLAYER_COLORS[p]||"#888":"#2a2a2a"}`,
               background:selectedPlayer===p?`${PLAYER_COLORS[p]||"#888"}18`:"transparent",
@@ -738,31 +926,14 @@ export default function BowlingApp() {
                 transition:"border-color 0.2s",
               }}
             />
-            {pwError && (
-              <div style={{fontSize:10,color:"#ff6b6b",marginTop:8,letterSpacing:1}}>
-                ✗ Falsches Passwort
-              </div>
-            )}
+            {pwError && <div style={{fontSize:10,color:"#ff6b6b",marginTop:8,letterSpacing:1}}>✗ Falsches Passwort</div>}
           </div>
 
           <button onClick={tryLogin} style={{
-            marginTop:18,
-            width:"100%",
-            background:"rgba(255,107,107,0.15)",
-            border:"1px solid #ff6b6b",
-            color:"#ff6b6b",
-            padding:"11px",
-            borderRadius:3,
-            cursor:"pointer",
-            fontSize:10,
-            letterSpacing:3,
-            textTransform:"uppercase",
-            fontFamily:"inherit",
-            fontWeight:600,
-            transition:"all 0.2s",
-          }}>
-            🎳 Einloggen
-          </button>
+            marginTop:18,width:"100%",background:"rgba(255,107,107,0.15)",border:"1px solid #ff6b6b",
+            color:"#ff6b6b",padding:"11px",borderRadius:3,cursor:"pointer",fontSize:10,
+            letterSpacing:3,textTransform:"uppercase",fontFamily:"inherit",fontWeight:600,transition:"all 0.2s",
+          }}>🎳 Einloggen</button>
 
           <div style={{fontSize:8,color:"#444",letterSpacing:2,marginTop:20,lineHeight:1.6}}>
             Nur für Mitglieder von<br/>"Last PIN Standing"
@@ -780,21 +951,12 @@ export default function BowlingApp() {
           <div>
             <div style={css.logo}><span>🎳</span><span>Last PIN Standing</span></div>
             <div style={css.sub}>Liga Bowling JCL · Saison 2025 / 2026</div>
-            <StatusBadge/>
+            {renderStatusBadge()}
           </div>
           <button onClick={logout} title="Abmelden" style={{
-            background:"transparent",
-            border:"1px solid #333",
-            color:"#666",
-            padding:"5px 10px",
-            borderRadius:2,
-            cursor:"pointer",
-            fontSize:8,
-            letterSpacing:2,
-            textTransform:"uppercase",
-            fontFamily:"inherit",
-            flexShrink:0,
-            transition:"all 0.2s",
+            background:"transparent",border:"1px solid #333",color:"#666",padding:"5px 10px",
+            borderRadius:2,cursor:"pointer",fontSize:8,letterSpacing:2,textTransform:"uppercase",
+            fontFamily:"inherit",flexShrink:0,transition:"all 0.2s",
           }}>🔒 Logout</button>
         </div>
         <div style={css.nav}>
@@ -803,10 +965,10 @@ export default function BowlingApp() {
           ))}
         </div>
       </div>
-      {view==="dashboard"&&<Dashboard/>}
-      {view==="eingabe"&&<Eingabe/>}
-      {view==="statistiken"&&<Statistiken/>}
-      {view==="spieler"&&<SpielerProfil/>}
+      {view==="dashboard"&&renderDashboard()}
+      {view==="eingabe"&&renderEingabe()}
+      {view==="statistiken"&&renderStatistiken()}
+      {view==="spieler"&&renderSpielerProfil()}
     </div>
   );
 }
